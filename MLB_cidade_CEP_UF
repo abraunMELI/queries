@@ -1,0 +1,153 @@
+/* *****************QUERY PARA BUSCAR LA CIUDAD, EL ZIP Y LA REGIÓN.*************************** */
+
+/* CONTEXTO: Busca en gateway el nodo options, existen dos tablas en gateway la authorizations y online payments es importante verificar que traiga ambas */
+
+/* TIP 1: Puede que la última parte no traiga exacto la ubicación, revisar el campo de optionos que es la posta. S */
+/* TIP 2: CHECKEAR LAS FECHAS DE temp_45.diariosor y temp_45.gtwt porque la query está hecha para un dia*/
+
+
+
+drop table temp_45.diariosor;
+CREATE TABLE temp_45.diariosor AS( 
+select a.*,
+pay.gtwt_transaction_id
+from SCORING.reportes_point a
+left join WHOWNER.BT_MP_PAY_PAYMENTS pay
+  on a.pay_payment_id = pay.pay_payment_id
+where a.sit_site_id in ('MLB')
+and pay.pay_Created_dt='2022-01-01'
+
+) with data primary index(pay_payment_id);
+
+select count(distinct pay_payment_id) from temp_45.diariosor ;
+
+drop table temp_45.seller_solo;
+CREATE TABLE temp_45.seller_solo AS( 
+Select 
+      distinct(p.cus_cust_id_sel)
+  
+from temp_45.diariosor P
+
+) with data primary index(cus_cust_id_sel);
+
+drop table temp_45.seller_kyc;
+CREATE TABLE temp_45.seller_kyc AS( 
+Select 
+  p.cus_cust_id_sel,
+	a.kyc_completed_level as kyc_completed_level_seller,
+	a.kyc_completed_datetime as completed_sel_datetime,
+	a.kyc_expiration_datetime
+  
+from temp_45.seller_solo P
+LEFT JOIN WHOWNER.BT_MP_KYC_LEVEL a
+	  ON (a.cus_cust_id=p.cus_cust_id_sel)
+	  where a.sit_site_id in ('MLB')
+) with data primary index(cus_cust_id_sel);
+
+drop table temp_45.kyc_seller_level;
+CREATE TABLE temp_45.kyc_seller_level AS( 
+Select 
+
+  p.*,
+	a.kyc_completed_level_seller,
+	a.completed_sel_datetime,
+	(p.pay_created_datetime - completed_sel_datetime) DAY(4) TO SECOND as dif_seller
+
+
+from temp_45.diariosor P
+
+LEFT JOIN temp_45.seller_kyc a
+	  ON (a.cus_cust_id_sel=p.cus_cust_id_sel
+	  AND p.pay_created_datetime > a.completed_sel_datetime  
+	 
+	  AND (p.pay_created_datetime < a.kyc_expiration_datetime OR a.kyc_expiration_datetime IS NULL))
+QUALIFY ROW_NUMBER() OVER(PARTITION BY pay_payment_id ORDER BY dif_seller ASC) = 1
+) with data primary index(pay_payment_id);
+
+
+select count(distinct pay_payment_id) from temp_45.kyc_seller_level ;
+
+
+drop table temp_45.gtwt;
+CREATE TABLE temp_45.gtwt AS( 
+select pay.*,
+    gtw.gtwt_transaction_id as   gtwt_transaction_id_v2,
+    CAST(gtw.gtwt_onl_purchase_id AS BIGINT) as  gtwt_onl_purchase_id,
+   CAST(gtw.gtwt_authorization_id AS BIGINT) as gtwt_authorization_id
+ 
+  /*, lk_gtw_authorizations.gtwa_options*/
+
+from temp_45.kyc_seller_level pay
+ INNER JOIN WHOWNER.BT_GTW_TRANSACTIONS gtw ON CAST(pay.gtwt_transaction_id AS BIGINT) = gtw.gtwt_transaction_id
+ -- LEFT JOIN WHOWNER.LK_GTW_ONLINE_PURCHASES lk_gtw_online_purchases ON CAST(gtw.gtwt_onl_purchase_id AS BIGINT) = lk_gtw_online_purchases.gtwo_onl_purchase_id
+ /* LEFT JOIN WHOWNER.LK_GTW_AUTHORIZATIONS lk_gtw_authorizations ON CAST(gtw.gtwt_authorization_id AS BIGINT) = lk_gtw_authorizations.gtwa_authorization_id */
+ where gtw.gtwt_creation_date >= '2021-12-31'
+ and gtw.gtwt_creation_date < '2022-12-03'
+ --- esto se puede variabilizar pero está puesto para cuando el pago es a media noche en MLB es una hora más de lo que figura en nuestras bases
+ and gtw.sit_site_id in ('MLB')
+) with data unique primary index(pay_payment_id);
+select count(distinct pay_payment_id) from temp_45.gtwt ;
+
+
+drop table temp_45.gtwa;
+CREATE TABLE temp_45.gtwa AS( 
+select pay.*,
+    lk_gtw_authorizations.gtwa_options as options
+  --  lk_gtw_online_purchases.gtwo_options
+from temp_45.gtwt pay
+
+--  LEFT JOIN WHOWNER.LK_GTW_ONLINE_PURCHASES lk_gtw_online_purchases ON pay.gtwt_onl_purchase_id = lk_gtw_online_purchases.gtwo_onl_purchase_id
+  LEFT JOIN WHOWNER.LK_GTW_AUTHORIZATIONS lk_gtw_authorizations ON pay.gtwt_authorization_id  = lk_gtw_authorizations.gtwa_authorization_id 
+  where lk_gtw_authorizations.gtwa_creation_date = cast(pay.pay_created_dt as date)
+-- and lk_gtw_authorizations.sit_site_id in ('MLB')
+) with data unique primary index(pay_payment_id);
+
+select count(distinct pay_payment_id) from temp_45.gtwa ;
+
+drop table temp_45.gtwo;
+CREATE TABLE temp_45.gtwo AS( 
+select pay.*,
+   -- lk_gtw_authorizations.gtwa_options
+   lk_gtw_online_purchases.gtwo_options as options
+from temp_45.gtwt pay
+
+  LEFT JOIN WHOWNER.LK_GTW_ONLINE_PURCHASES lk_gtw_online_purchases ON pay.gtwt_onl_purchase_id = lk_gtw_online_purchases.gtwo_onl_purchase_id
+--  LEFT JOIN WHOWNER.LK_GTW_AUTHORIZATIONS lk_gtw_authorizations ON pay.gtwt_authorization_id  = lk_gtw_authorizations.gtwa_authorization_id 
+  where lk_gtw_online_purchases.gtwo_creation_date=cast(pay.pay_created_dt as date)
+-- and lk_gtw_authorizations.sit_site_id in ('MLB')
+) with data unique primary index(pay_payment_id);
+
+select count(distinct pay_payment_id) from temp_45.gtwo ;
+
+SELECT TOP 100 * FROM temp_45.gtwo;
+
+drop table temp_45.gtw;
+CREATE TABLE temp_45.gtw AS( 
+SELECT *
+FROM temp_45.gtwo
+UNION ALL
+SELECT *
+FROM temp_45.gtwa
+
+) with data unique primary index(pay_payment_id);
+
+
+
+select top 100 pay.*,
+
+
+    case when strtok(pay.options, ',', 2) like ('"device%') 
+         then strtok(pay.options, ',', 13) 
+         else strtok(pay.options, ',', 12) end as  uf,
+    case when strtok(pay.options, ',', 2) like ('"device%') 
+         then strtok(pay.options, ',', 6) 
+         else strtok(pay.options, ',', 5) end as  citys,
+    case when strtok(pay.options, ',', 2) like ('"device%') 
+         then strtok(pay.options, ',', 12) 
+         else strtok(pay.options, ',', 13) end as  zip
+         
+    
+
+from temp_45.gtw pay;
+
+--PUEDE QUE ALGUNOS NO ESTÉN BIEN CON LA COMA, LA POSTA ES FIJARSE EN EL CAMPO DE OPTIONS, quizás la ubicación no es uniforme.
